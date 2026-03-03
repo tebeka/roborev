@@ -14,12 +14,12 @@ import (
 )
 
 // PostgreSQL schema version - increment when schema changes
-const pgSchemaVersion = 5
+const pgSchemaVersion = 6
 
 // pgSchemaName is the PostgreSQL schema used to isolate roborev tables
 const pgSchemaName = "roborev"
 
-//go:embed schemas/postgres_v5.sql
+//go:embed schemas/postgres_v6.sql
 var pgSchemaSQL string
 
 // pgSchemaStatements returns the individual DDL statements for schema creation.
@@ -248,6 +248,26 @@ func (p *PgPool) EnsureSchema(ctx context.Context) error {
 			_, err = p.pool.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_review_jobs_patch_id ON review_jobs(patch_id)`)
 			if err != nil {
 				return fmt.Errorf("migrate to v5 (add patch_id index): %w", err)
+			}
+		}
+		if currentVersion < 6 {
+			// Migration 5->6: Rename addressed to closed in reviews.
+			// Idempotent: skip if addressed column doesn't exist
+			// (fresh installs create the table with closed directly).
+			_, err = p.pool.Exec(ctx, `
+				DO $$ BEGIN
+					IF EXISTS (
+						SELECT 1 FROM information_schema.columns
+						WHERE table_schema = 'roborev'
+						AND table_name = 'reviews'
+						AND column_name = 'addressed'
+					) THEN
+						ALTER TABLE reviews
+							RENAME COLUMN addressed TO closed;
+					END IF;
+				END $$`)
+			if err != nil {
+				return fmt.Errorf("migrate to v6 (rename addressed to closed): %w", err)
 			}
 		}
 		// Update version
@@ -524,14 +544,14 @@ func (p *PgPool) UpsertJob(ctx context.Context, j SyncableJob, pgRepoID int64, p
 func (p *PgPool) UpsertReview(ctx context.Context, r SyncableReview) error {
 	_, err := p.pool.Exec(ctx, `
 		INSERT INTO reviews (
-			uuid, job_uuid, agent, prompt, output, addressed,
+			uuid, job_uuid, agent, prompt, output, closed,
 			updated_by_machine_id, created_at, updated_at
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
 		ON CONFLICT (uuid) DO UPDATE SET
-			addressed = EXCLUDED.addressed,
+			closed = EXCLUDED.closed,
 			updated_by_machine_id = EXCLUDED.updated_by_machine_id,
 			updated_at = NOW()
-	`, r.UUID, r.JobUUID, r.Agent, r.Prompt, r.Output, r.Addressed,
+	`, r.UUID, r.JobUUID, r.Agent, r.Prompt, r.Output, r.Closed,
 		r.UpdatedByMachineID, r.CreatedAt)
 	return err
 }
@@ -653,7 +673,7 @@ type PulledReview struct {
 	Agent              string
 	Prompt             string
 	Output             string
-	Addressed          bool
+	Closed             bool
 	UpdatedByMachineID string
 	CreatedAt          time.Time
 	UpdatedAt          time.Time
@@ -680,7 +700,7 @@ func (p *PgPool) PullReviews(ctx context.Context, excludeMachineID string, known
 
 	rows, err := p.pool.Query(ctx, `
 		SELECT
-			r.uuid, r.job_uuid, r.agent, r.prompt, r.output, r.addressed,
+			r.uuid, r.job_uuid, r.agent, r.prompt, r.output, r.closed,
 			r.updated_by_machine_id, r.created_at, r.updated_at, r.id
 		FROM reviews r
 		WHERE (r.updated_by_machine_id IS NULL OR r.updated_by_machine_id != $1)
@@ -702,7 +722,7 @@ func (p *PgPool) PullReviews(ctx context.Context, excludeMachineID string, known
 		var r PulledReview
 
 		err := rows.Scan(
-			&r.UUID, &r.JobUUID, &r.Agent, &r.Prompt, &r.Output, &r.Addressed,
+			&r.UUID, &r.JobUUID, &r.Agent, &r.Prompt, &r.Output, &r.Closed,
 			&r.UpdatedByMachineID, &r.CreatedAt, &r.UpdatedAt, &lastID,
 		)
 		if err != nil {
@@ -802,14 +822,14 @@ func (p *PgPool) BatchUpsertReviews(ctx context.Context, reviews []SyncableRevie
 	for _, r := range reviews {
 		batch.Queue(`
 			INSERT INTO reviews (
-				uuid, job_uuid, agent, prompt, output, addressed,
+				uuid, job_uuid, agent, prompt, output, closed,
 				updated_by_machine_id, created_at, updated_at
 			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
 			ON CONFLICT (uuid) DO UPDATE SET
-				addressed = EXCLUDED.addressed,
+				closed = EXCLUDED.closed,
 				updated_by_machine_id = EXCLUDED.updated_by_machine_id,
 				updated_at = NOW()
-		`, r.UUID, r.JobUUID, r.Agent, r.Prompt, r.Output, r.Addressed,
+		`, r.UUID, r.JobUUID, r.Agent, r.Prompt, r.Output, r.Closed,
 			r.UpdatedByMachineID, r.CreatedAt)
 	}
 

@@ -266,8 +266,8 @@ func TestFixSingleJob(t *testing.T) {
 	if !strings.Contains(outputStr, "Issues") {
 		t.Error("output should show analysis findings")
 	}
-	if !strings.Contains(outputStr, "marked as addressed") {
-		t.Error("output should confirm job addressed")
+	if !strings.Contains(outputStr, "closed") {
+		t.Error("output should confirm job closed")
 	}
 }
 
@@ -304,24 +304,24 @@ func TestFixCmdFlagValidation(t *testing.T) {
 		wantErr string
 	}{
 		{
-			name:    "--branch without --unaddressed",
+			name:    "--branch without --open",
 			args:    []string{"--branch", "main"},
-			wantErr: "--branch requires --unaddressed",
+			wantErr: "--branch requires --open",
 		},
 		{
 			name:    "--all-branches with positional args",
 			args:    []string{"--all-branches", "123"},
-			wantErr: "--unaddressed cannot be used with positional job IDs",
+			wantErr: "--open cannot be used with positional job IDs",
 		},
 		{
-			name:    "--unaddressed with positional args",
+			name:    "--open with positional args",
 			args:    []string{"--unaddressed", "123"},
-			wantErr: "--unaddressed cannot be used with positional job IDs",
+			wantErr: "--open cannot be used with positional job IDs",
 		},
 		{
-			name:    "--newest-first without --unaddressed",
+			name:    "--newest-first without --open",
 			args:    []string{"--newest-first", "123"},
-			wantErr: "--newest-first requires --unaddressed",
+			wantErr: "--newest-first requires --open",
 		},
 		{
 			name:    "--all-branches with --branch (no explicit --unaddressed)",
@@ -329,9 +329,9 @@ func TestFixCmdFlagValidation(t *testing.T) {
 			wantErr: "--all-branches and --branch are mutually exclusive",
 		},
 		{
-			name:    "--batch with --unaddressed",
+			name:    "--batch with --open",
 			args:    []string{"--batch", "--unaddressed"},
-			wantErr: "--batch and --unaddressed are mutually exclusive",
+			wantErr: "--batch and --open are mutually exclusive",
 		},
 		{
 			name:    "--batch with explicit IDs and --branch",
@@ -377,9 +377,9 @@ func TestFixCmdFlagValidation(t *testing.T) {
 	}
 }
 
-func TestFixNoArgsDefaultsToUnaddressed(t *testing.T) {
+func TestFixNoArgsDefaultsToOpen(t *testing.T) {
 	// Running fix with no args should not produce a validation error —
-	// it should enter the unaddressed path (which will fail at daemon
+	// it should enter the open path (which will fail at daemon
 	// connection, not at argument validation).
 	//
 	// Use a mock daemon so ensureDaemon doesn't try to spawn a real
@@ -400,13 +400,13 @@ func TestFixNoArgsDefaultsToUnaddressed(t *testing.T) {
 	// Should NOT be a validation/args error; any other error (e.g. daemon
 	// not running) is acceptable.
 	if err != nil && strings.Contains(err.Error(), "requires at least") {
-		t.Errorf("no-args should default to --unaddressed, got validation error: %v", err)
+		t.Errorf("no-args should default to --open, got validation error: %v", err)
 	}
 }
 
-func TestFixAllBranchesImpliesUnaddressed(t *testing.T) {
-	// --all-branches alone should imply --unaddressed and pass
-	// validation, routing through unaddressed discovery.
+func TestFixAllBranchesImpliesOpen(t *testing.T) {
+	// --all-branches alone should imply --open and pass
+	// validation, routing through open discovery.
 	daemonFromHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
 			"jobs":     []any{},
@@ -424,18 +424,18 @@ func TestFixAllBranchesImpliesUnaddressed(t *testing.T) {
 	}
 }
 
-func TestRunFixUnaddressed(t *testing.T) {
+func TestRunFixOpen(t *testing.T) {
 	repo := createTestRepo(t, map[string]string{"f.txt": "x"})
 
-	t.Run("no unaddressed jobs", func(t *testing.T) {
+	t.Run("no open jobs", func(t *testing.T) {
 		_ = newMockDaemonBuilder(t).
 			WithHandler("/api/jobs", func(w http.ResponseWriter, r *http.Request) {
 				q := r.URL.Query()
 				if q.Get("status") != "done" {
 					t.Errorf("expected status=done, got %q", q.Get("status"))
 				}
-				if q.Get("addressed") != "false" {
-					t.Errorf("expected addressed=false, got %q", q.Get("addressed"))
+				if q.Get("closed") != "false" {
+					t.Errorf("expected closed=false, got %q", q.Get("closed"))
 				}
 				writeJSON(w, map[string]any{
 					"jobs":     []storage.ReviewJob{},
@@ -445,25 +445,25 @@ func TestRunFixUnaddressed(t *testing.T) {
 			Build()
 
 		out, err := runWithOutput(t, repo.Dir, func(cmd *cobra.Command) error {
-			return runFixUnaddressed(cmd, "", false, fixOptions{agentName: "test"})
+			return runFixOpen(cmd, "", false, fixOptions{agentName: "test"})
 		})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if !strings.Contains(out, "No unaddressed jobs found") {
-			t.Errorf("expected 'No unaddressed jobs found' message, got %q", out)
+		if !strings.Contains(out, "No open jobs found") {
+			t.Errorf("expected 'No open jobs found' message, got %q", out)
 		}
 	})
 
-	t.Run("finds and processes unaddressed jobs", func(t *testing.T) {
-		var reviewCalls, addressCalls atomic.Int32
-		var unaddressedCalls atomic.Int32
+	t.Run("finds and processes open jobs", func(t *testing.T) {
+		var reviewCalls, closeCalls atomic.Int32
+		var openQueryCalls atomic.Int32
 
 		_ = newMockDaemonBuilder(t).
 			WithHandler("/api/jobs", func(w http.ResponseWriter, r *http.Request) {
 				q := r.URL.Query()
-				if q.Get("addressed") == "false" && q.Get("limit") == "0" {
-					if unaddressedCalls.Add(1) == 1 {
+				if q.Get("closed") == "false" && q.Get("limit") == "0" {
+					if openQueryCalls.Add(1) == 1 {
 						writeJSON(w, map[string]any{
 							"jobs": []storage.ReviewJob{
 								{ID: 10, Status: storage.JobStatusDone, Agent: "test"},
@@ -490,8 +490,8 @@ func TestRunFixUnaddressed(t *testing.T) {
 				reviewCalls.Add(1)
 				writeJSON(w, storage.Review{Output: "findings"})
 			}).
-			WithHandler("/api/review/address", func(w http.ResponseWriter, r *http.Request) {
-				addressCalls.Add(1)
+			WithHandler("/api/review/close", func(w http.ResponseWriter, r *http.Request) {
+				closeCalls.Add(1)
 				w.WriteHeader(http.StatusOK)
 			}).
 			WithHandler("/api/enqueue", func(w http.ResponseWriter, r *http.Request) {
@@ -500,19 +500,19 @@ func TestRunFixUnaddressed(t *testing.T) {
 			Build()
 
 		out, err := runWithOutput(t, repo.Dir, func(cmd *cobra.Command) error {
-			return runFixUnaddressed(cmd, "", false, fixOptions{agentName: "test", reasoning: "fast"})
+			return runFixOpen(cmd, "", false, fixOptions{agentName: "test", reasoning: "fast"})
 		})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if !strings.Contains(out, "Found 2 unaddressed job(s)") {
+		if !strings.Contains(out, "Found 2 open job(s)") {
 			t.Errorf("expected count message, got %q", out)
 		}
 		if rc := reviewCalls.Load(); rc != 2 {
 			t.Errorf("expected 2 review fetches, got %d", rc)
 		}
-		if ac := addressCalls.Load(); ac != 2 {
-			t.Errorf("expected 2 address calls, got %d", ac)
+		if ac := closeCalls.Load(); ac != 2 {
+			t.Errorf("expected 2 close calls, got %d", ac)
 		}
 	})
 
@@ -520,7 +520,7 @@ func TestRunFixUnaddressed(t *testing.T) {
 		var gotBranch string
 		_ = newMockDaemonBuilder(t).
 			WithHandler("/api/jobs", func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Query().Get("addressed") == "false" {
+				if r.URL.Query().Get("closed") == "false" {
 					gotBranch = r.URL.Query().Get("branch")
 				}
 				writeJSON(w, map[string]any{
@@ -531,10 +531,10 @@ func TestRunFixUnaddressed(t *testing.T) {
 			Build()
 
 		_, err := runWithOutput(t, repo.Dir, func(cmd *cobra.Command) error {
-			return runFixUnaddressed(cmd, "feature-branch", false, fixOptions{agentName: "test"})
+			return runFixOpen(cmd, "feature-branch", false, fixOptions{agentName: "test"})
 		})
 		if err != nil {
-			t.Fatalf("runFixUnaddressed returned unexpected error: %v", err)
+			t.Fatalf("runFixOpen returned unexpected error: %v", err)
 		}
 		if gotBranch != "feature-branch" {
 			t.Errorf("expected branch=feature-branch, got %q", gotBranch)
@@ -550,7 +550,7 @@ func TestRunFixUnaddressed(t *testing.T) {
 			Build()
 
 		_, err := runWithOutput(t, repo.Dir, func(cmd *cobra.Command) error {
-			return runFixUnaddressed(cmd, "", false, fixOptions{agentName: "test"})
+			return runFixOpen(cmd, "", false, fixOptions{agentName: "test"})
 		})
 		if err == nil {
 			t.Fatal("expected error on server failure")
@@ -560,16 +560,16 @@ func TestRunFixUnaddressed(t *testing.T) {
 		}
 	})
 }
-func TestRunFixUnaddressedOrdering(t *testing.T) {
+func TestRunFixOpenOrdering(t *testing.T) {
 	repo := createTestRepo(t, map[string]string{"f.txt": "x"})
 
 	makeBuilder := func() (*MockDaemonBuilder, *atomic.Int32) {
-		var unaddressedCalls atomic.Int32
+		var openQueryCalls atomic.Int32
 		b := newMockDaemonBuilder(t).
 			WithHandler("/api/jobs", func(w http.ResponseWriter, r *http.Request) {
 				q := r.URL.Query()
-				if q.Get("addressed") == "false" {
-					if unaddressedCalls.Add(1) == 1 {
+				if q.Get("closed") == "false" {
+					if openQueryCalls.Add(1) == 1 {
 						// Return newest first (as the API does)
 						writeJSON(w, map[string]any{
 							"jobs": []storage.ReviewJob{
@@ -600,13 +600,13 @@ func TestRunFixUnaddressedOrdering(t *testing.T) {
 			WithHandler("/api/comment", func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusCreated)
 			}).
-			WithHandler("/api/review/address", func(w http.ResponseWriter, r *http.Request) {
+			WithHandler("/api/review/close", func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusOK)
 			}).
 			WithHandler("/api/enqueue", func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusOK)
 			})
-		return b, &unaddressedCalls
+		return b, &openQueryCalls
 	}
 
 	t.Run("oldest first by default", func(t *testing.T) {
@@ -614,7 +614,7 @@ func TestRunFixUnaddressedOrdering(t *testing.T) {
 		b.Build()
 
 		out, err := runWithOutput(t, repo.Dir, func(cmd *cobra.Command) error {
-			return runFixUnaddressed(cmd, "", false, fixOptions{agentName: "test", reasoning: "fast"})
+			return runFixOpen(cmd, "", false, fixOptions{agentName: "test", reasoning: "fast"})
 		})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -629,7 +629,7 @@ func TestRunFixUnaddressedOrdering(t *testing.T) {
 		b.Build()
 
 		out, err := runWithOutput(t, repo.Dir, func(cmd *cobra.Command) error {
-			return runFixUnaddressed(cmd, "", true, fixOptions{agentName: "test", reasoning: "fast"})
+			return runFixOpen(cmd, "", true, fixOptions{agentName: "test", reasoning: "fast"})
 		})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -639,14 +639,14 @@ func TestRunFixUnaddressedOrdering(t *testing.T) {
 		}
 	})
 }
-func TestRunFixUnaddressedRequery(t *testing.T) {
+func TestRunFixOpenRequery(t *testing.T) {
 	repo := createTestRepo(t, map[string]string{"f.txt": "x"})
 
 	var queryCount atomic.Int32
 	_ = newMockDaemonBuilder(t).
 		WithHandler("/api/jobs", func(w http.ResponseWriter, r *http.Request) {
 			q := r.URL.Query()
-			if q.Get("addressed") == "false" && q.Get("limit") == "0" {
+			if q.Get("closed") == "false" && q.Get("limit") == "0" {
 				n := queryCount.Add(1)
 				switch n {
 				case 1:
@@ -689,7 +689,7 @@ func TestRunFixUnaddressedRequery(t *testing.T) {
 		WithHandler("/api/comment", func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusCreated)
 		}).
-		WithHandler("/api/review/address", func(w http.ResponseWriter, r *http.Request) {
+		WithHandler("/api/review/close", func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 		}).
 		WithHandler("/api/enqueue", func(w http.ResponseWriter, r *http.Request) {
@@ -698,16 +698,16 @@ func TestRunFixUnaddressedRequery(t *testing.T) {
 		Build()
 
 	out, err := runWithOutput(t, repo.Dir, func(cmd *cobra.Command) error {
-		return runFixUnaddressed(cmd, "", false, fixOptions{agentName: "test", reasoning: "fast"})
+		return runFixOpen(cmd, "", false, fixOptions{agentName: "test", reasoning: "fast"})
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if !strings.Contains(out, "Found 1 unaddressed job(s)") {
+	if !strings.Contains(out, "Found 1 open job(s)") {
 		t.Errorf("expected first batch message, got %q", out)
 	}
-	if !strings.Contains(out, "Found 1 new unaddressed job(s)") {
+	if !strings.Contains(out, "Found 1 new open job(s)") {
 		t.Errorf("expected second batch message, got %q", out)
 	}
 	if int(queryCount.Load()) != 3 {
@@ -1036,7 +1036,7 @@ func TestEnqueueIfNeededSkipsWhenJobExists(t *testing.T) {
 func TestRunFixList(t *testing.T) {
 	repo := createTestRepo(t, map[string]string{"f.txt": "x"})
 
-	t.Run("lists unaddressed jobs with details", func(t *testing.T) {
+	t.Run("lists open jobs with details", func(t *testing.T) {
 		finishedAt := time.Date(2024, 6, 15, 10, 30, 0, 0, time.UTC)
 		verdict := "FAIL"
 
@@ -1064,7 +1064,7 @@ func TestRunFixList(t *testing.T) {
 		}
 
 		// Check header
-		if !strings.Contains(out, "Found 1 unaddressed fix(es):") {
+		if !strings.Contains(out, "Found 1 open job(s):") {
 			t.Errorf("expected header message, got:\n%s", out)
 		}
 
@@ -1098,12 +1098,12 @@ func TestRunFixList(t *testing.T) {
 		if !strings.Contains(out, "roborev fix <job_id>") {
 			t.Errorf("expected usage hint, got:\n%s", out)
 		}
-		if !strings.Contains(out, "roborev fix --unaddressed") {
-			t.Errorf("expected unaddressed hint, got:\n%s", out)
+		if !strings.Contains(out, "roborev fix --open") {
+			t.Errorf("expected open hint, got:\n%s", out)
 		}
 	})
 
-	t.Run("no unaddressed jobs", func(t *testing.T) {
+	t.Run("no open jobs", func(t *testing.T) {
 		_ = newMockDaemonBuilder(t).
 			WithJobs([]storage.ReviewJob{}).
 			Build()
@@ -1115,7 +1115,7 @@ func TestRunFixList(t *testing.T) {
 			t.Fatalf("runFixList: %v", err)
 		}
 
-		if !strings.Contains(out, "No unaddressed jobs found") {
+		if !strings.Contains(out, "No open jobs found") {
 			t.Errorf("expected no jobs message, got:\n%s", out)
 		}
 	})
@@ -1125,7 +1125,7 @@ func TestRunFixList(t *testing.T) {
 		_ = newMockDaemonBuilder(t).
 			WithHandler("/api/jobs", func(w http.ResponseWriter, r *http.Request) {
 				q := r.URL.Query()
-				if q.Get("addressed") == "false" && q.Get("limit") == "0" {
+				if q.Get("closed") == "false" && q.Get("limit") == "0" {
 					// API returns newest first
 					writeJSON(w, map[string]any{
 						"jobs": []storage.ReviewJob{
@@ -1251,7 +1251,7 @@ func TestFixWorktreeRepoResolution(t *testing.T) {
 		}
 	})
 
-	t.Run("runFixUnaddressed sends main repo path", func(t *testing.T) {
+	t.Run("runFixOpen sends main repo path", func(t *testing.T) {
 		receivedRepo := setupWorktreeMockDaemon(t)
 		repo, worktreeDir := setupWorktree(t)
 		chdir(t, worktreeDir)
@@ -1260,8 +1260,8 @@ func TestFixWorktreeRepoResolution(t *testing.T) {
 		var buf bytes.Buffer
 		cmd.SetOut(&buf)
 		opts := fixOptions{quiet: true}
-		if err := runFixUnaddressed(cmd, "", false, opts); err != nil {
-			t.Fatalf("runFixUnaddressed: %v", err)
+		if err := runFixOpen(cmd, "", false, opts); err != nil {
+			t.Fatalf("runFixOpen: %v", err)
 		}
 
 		if *receivedRepo == "" {
@@ -1281,7 +1281,7 @@ func TestFixWorktreeRepoResolution(t *testing.T) {
 		var buf bytes.Buffer
 		cmd.SetOut(&buf)
 		opts := fixOptions{quiet: true}
-		// nil jobIDs triggers discovery via queryUnaddressedJobs
+		// nil jobIDs triggers discovery via queryOpenJobs
 		if err := runFixBatch(cmd, nil, "", false, opts); err != nil {
 			t.Fatalf("runFixBatch: %v", err)
 		}
@@ -1349,7 +1349,7 @@ func TestFixSingleJobSkipsPassVerdict(t *testing.T) {
 		"main.go": "package main\n",
 	})
 
-	var addressCalls atomic.Int32
+	var closeCalls atomic.Int32
 	var agentCalled atomic.Int32
 
 	ts, _ := newMockServer(t, MockServerOpts{
@@ -1364,10 +1364,10 @@ func TestFixSingleJobSkipsPassVerdict(t *testing.T) {
 			})
 		},
 	})
-	// Wrap the server to track address calls
+	// Wrap the server to track close calls
 	wrapper := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/review/address" {
-			addressCalls.Add(1)
+		if r.URL.Path == "/api/review/close" {
+			closeCalls.Add(1)
 			w.WriteHeader(http.StatusOK)
 			return
 		}
@@ -1415,8 +1415,8 @@ func TestFixSingleJobSkipsPassVerdict(t *testing.T) {
 	if agentCalled.Load() != 0 {
 		t.Error("agent should not have been invoked for passing review")
 	}
-	if addressCalls.Load() != 1 {
-		t.Errorf("expected 1 address call, got %d", addressCalls.Load())
+	if closeCalls.Load() != 1 {
+		t.Errorf("expected 1 close call, got %d", closeCalls.Load())
 	}
 }
 
@@ -1426,7 +1426,7 @@ func TestFixBatchSkipsPassVerdict(t *testing.T) {
 	})
 
 	var mu sync.Mutex
-	var addressedJobIDs []int64
+	var closedJobIDs []int64
 
 	passVerdict := "P"
 
@@ -1471,13 +1471,13 @@ func TestFixBatchSkipsPassVerdict(t *testing.T) {
 				})
 			}
 		}).
-		WithHandler("/api/review/address", func(w http.ResponseWriter, r *http.Request) {
+		WithHandler("/api/review/close", func(w http.ResponseWriter, r *http.Request) {
 			var body struct {
 				JobID int64 `json:"job_id"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&body); err == nil {
 				mu.Lock()
-				addressedJobIDs = append(addressedJobIDs, body.JobID)
+				closedJobIDs = append(closedJobIDs, body.JobID)
 				mu.Unlock()
 			}
 			w.WriteHeader(http.StatusOK)
@@ -1508,11 +1508,11 @@ func TestFixBatchSkipsPassVerdict(t *testing.T) {
 		t.Errorf("expected FAIL job findings in output, got:\n%s", out)
 	}
 
-	// Verify PASS job 10 was marked addressed during the skip phase
+	// Verify PASS job 10 was closed during the skip phase
 	mu.Lock()
-	ids := addressedJobIDs
+	ids := closedJobIDs
 	mu.Unlock()
 	if !slices.Contains(ids, int64(10)) {
-		t.Errorf("expected job 10 to be marked addressed, got IDs: %v", ids)
+		t.Errorf("expected job 10 to be closed, got IDs: %v", ids)
 	}
 }

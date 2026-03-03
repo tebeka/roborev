@@ -46,12 +46,13 @@ var (
 	queuedStyle   = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "136", Dark: "226"}) // Yellow/Gold
 	runningStyle  = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "25", Dark: "33"})   // Blue
 	doneStyle     = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "28", Dark: "46"})   // Green
-	failedStyle   = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "124", Dark: "196"}) // Red
-	canceledStyle = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "166", Dark: "208"}) // Orange
+	failedStyle   = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "166", Dark: "208"}) // Orange (job error)
+	canceledStyle = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "243", Dark: "245"}) // Gray
 
-	passStyle      = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "28", Dark: "46"})   // Green
-	failStyle      = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "124", Dark: "196"}) // Red
-	addressedStyle = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "30", Dark: "51"})   // Cyan
+	passStyle   = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "28", Dark: "46"})   // Green
+	failStyle   = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "124", Dark: "196"}) // Red (review found issues)
+	readyStyle  = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "27", Dark: "39"})   // Blue (done, no verdict)
+	closedStyle = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "30", Dark: "51"})   // Cyan
 
 	helpStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.AdaptiveColor{Light: "242", Dark: "246"}) // Gray
@@ -254,7 +255,7 @@ type model struct {
 	client           *http.Client
 	glamourStyle     gansi.StyleConfig // detected once at init
 	jobs             []storage.ReviewJob
-	jobStats         storage.JobStats // aggregate done/addressed/unaddressed from server
+	jobStats         storage.JobStats // aggregate done/closed/open from server
 	status           storage.DaemonStatus
 	selectedIdx      int
 	selectedJobID    int64 // Track selected job by ID to maintain position on refresh
@@ -302,7 +303,7 @@ type model struct {
 	activeRepoFilter   []string // Empty = show all, otherwise repo root_paths to filter by
 	activeBranchFilter string   // Empty = show all, otherwise branch name to filter by
 	filterStack        []string // Order of applied filters: "repo", "branch" - for escape to pop in order
-	hideAddressed      bool     // When true, hide jobs with addressed reviews
+	hideClosed         bool     // When true, hide jobs with closed reviews
 
 	// Display name cache (keyed by repo path)
 	displayNames map[string]string
@@ -317,10 +318,10 @@ type model struct {
 	cwdRepoRoot string
 	cwdBranch   string
 
-	// Pending addressed state changes (prevents flash during refresh race)
+	// Pending closed state changes (prevents flash during refresh race)
 	// Each pending entry stores the requested state and a sequence number to
 	// distinguish between multiple requests for the same state (e.g., true→false→true)
-	pendingAddressed map[int64]pendingState // job ID -> pending state
+	pendingClosed map[int64]pendingState // job ID -> pending state
 
 	// Flash message (temporary status message shown briefly)
 	flashMessage   string
@@ -330,8 +331,8 @@ type model struct {
 	// Track config reload notifications
 	lastConfigReloadCounter uint64                 // Last known ConfigReloadCounter from daemon status
 	statusFetchedOnce       bool                   // True after first successful status fetch (for flash logic)
-	pendingReviewAddressed  map[int64]pendingState // review ID -> pending state (for reviews without jobs)
-	addressedSeq            uint64                 // monotonic counter for request sequencing
+	pendingReviewClosed     map[int64]pendingState // review ID -> pending state (for reviews without jobs)
+	closedSeq               uint64                 // monotonic counter for request sequencing
 
 	// Daemon reconnection state
 	consecutiveErrors int  // Count of consecutive connection failures
@@ -427,7 +428,7 @@ func newModel(serverAddr string, opts ...option) model {
 	}
 
 	daemonVersion := "?"
-	hideAddressed := false
+	hideClosed := false
 	autoFilterRepo := false
 	tabWidth := 2
 	columnBorders := false
@@ -444,12 +445,19 @@ func newModel(serverAddr string, opts ...option) model {
 
 		// Load preferences from config
 		if cfg, err := config.LoadGlobal(); err == nil {
-			hideAddressed = cfg.HideAddressedByDefault
+			hideClosed = cfg.HideClosedByDefault
 			autoFilterRepo = cfg.AutoFilterRepo
 			if cfg.TabWidth > 0 {
 				tabWidth = cfg.TabWidth
 			}
 			columnBorders = cfg.ColumnBorders
+
+			if migrateColumnConfig(cfg) {
+				if err := config.SaveGlobal(cfg); err != nil {
+					log.Printf("warning: failed to save migrated config: %v", err)
+				}
+			}
+
 			hiddenCols = parseHiddenColumns(cfg.HiddenColumns)
 			colOrder = parseColumnOrder(cfg.ColumnOrder)
 			taskColOrder = parseTaskColumnOrder(cfg.TaskColumnOrder)
@@ -484,35 +492,35 @@ func newModel(serverAddr string, opts ...option) model {
 	}
 
 	return model{
-		serverAddr:             serverAddr,
-		daemonVersion:          daemonVersion,
-		client:                 &http.Client{Timeout: 10 * time.Second},
-		glamourStyle:           streamfmt.GlamourStyle(),
-		jobs:                   []storage.ReviewJob{},
-		currentView:            viewQueue,
-		width:                  80, // sensible defaults until we get WindowSizeMsg
-		height:                 24,
-		loadingJobs:            true, // Init() calls fetchJobs, so mark as loading
-		hideAddressed:          hideAddressed,
-		activeRepoFilter:       activeRepoFilter,
-		activeBranchFilter:     activeBranchFilter,
-		filterStack:            filterStack,
-		lockedRepoFilter:       lockedRepo,
-		lockedBranchFilter:     lockedBranch,
-		cwdRepoRoot:            cwdRepoRoot,
-		cwdBranch:              cwdBranch,
-		displayNames:           make(map[string]string),      // Cache display names to avoid disk reads on render
-		branchNames:            make(map[int64]string),       // Cache derived branch names to avoid git calls on render
-		pendingAddressed:       make(map[int64]pendingState), // Track pending addressed changes (by job ID)
-		pendingReviewAddressed: make(map[int64]pendingState), // Track pending addressed changes (by review ID)
-		clipboard:              &realClipboard{},
-		mdCache:                newMarkdownCache(tabWidth),
-		colBordersOn:           columnBorders,
-		hiddenColumns:          hiddenCols,
-		columnOrder:            colOrder,
-		taskColumnOrder:        taskColOrder,
-		queueColCache:          &colWidthCache{gen: -1},
-		taskColCache:           &colWidthCache{gen: -1},
+		serverAddr:          serverAddr,
+		daemonVersion:       daemonVersion,
+		client:              &http.Client{Timeout: 10 * time.Second},
+		glamourStyle:        streamfmt.GlamourStyle(),
+		jobs:                []storage.ReviewJob{},
+		currentView:         viewQueue,
+		width:               80, // sensible defaults until we get WindowSizeMsg
+		height:              24,
+		loadingJobs:         true, // Init() calls fetchJobs, so mark as loading
+		hideClosed:          hideClosed,
+		activeRepoFilter:    activeRepoFilter,
+		activeBranchFilter:  activeBranchFilter,
+		filterStack:         filterStack,
+		lockedRepoFilter:    lockedRepo,
+		lockedBranchFilter:  lockedBranch,
+		cwdRepoRoot:         cwdRepoRoot,
+		cwdBranch:           cwdBranch,
+		displayNames:        make(map[string]string),      // Cache display names to avoid disk reads on render
+		branchNames:         make(map[int64]string),       // Cache derived branch names to avoid git calls on render
+		pendingClosed:       make(map[int64]pendingState), // Track pending closed changes (by job ID)
+		pendingReviewClosed: make(map[int64]pendingState), // Track pending closed changes (by review ID)
+		clipboard:           &realClipboard{},
+		mdCache:             newMarkdownCache(tabWidth),
+		colBordersOn:        columnBorders,
+		hiddenColumns:       hiddenCols,
+		columnOrder:         colOrder,
+		taskColumnOrder:     taskColOrder,
+		queueColCache:       &colWidthCache{gen: -1},
+		taskColCache:        &colWidthCache{gen: -1},
 	}
 }
 
@@ -648,10 +656,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		result, cmd = m.handlePromptMsg(msg)
 	case logOutputMsg:
 		result, cmd = m.handleLogOutputMsg(msg)
-	case addressedMsg:
-		result, cmd = m.handleAddressedToggleMsg(msg)
-	case addressedResultMsg:
-		result, cmd = m.handleAddressedResultMsg(msg)
+	case closedMsg:
+		result, cmd = m.handleClosedToggleMsg(msg)
+	case closedResultMsg:
+		result, cmd = m.handleClosedResultMsg(msg)
 	case cancelResultMsg:
 		result, cmd = m.handleCancelResultMsg(msg)
 	case rerunResultMsg:

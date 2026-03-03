@@ -51,13 +51,13 @@ func TestTUIRenderViews(t *testing.T) {
 		checkNoVerdictOnLine3     bool
 	}{
 		{
-			name:   "review view with branch and addressed",
+			name:   "review view with branch and closed",
 			view:   viewReview,
 			branch: "feature/test",
 			review: &storage.Review{
-				ID:        10,
-				Output:    "Some review output",
-				Addressed: true,
+				ID:     10,
+				Output: "Some review output",
+				Closed: true,
 				Job: &storage.ReviewJob{
 					ID:       1,
 					GitRef:   "abc1234",
@@ -65,7 +65,7 @@ func TestTUIRenderViews(t *testing.T) {
 					Agent:    "codex",
 				},
 			},
-			wantContains: []string{"on feature/test", "[ADDRESSED]", "myrepo", "abc1234"},
+			wantContains: []string{"on feature/test", "[CLOSED]", "myrepo", "abc1234"},
 		},
 		{
 			name: "review view with model",
@@ -187,12 +187,12 @@ func TestTUIRenderViews(t *testing.T) {
 			checkContentStartsOnLine4: true,
 		},
 		{
-			name: "review view addressed without verdict",
+			name: "review view closed without verdict",
 			view: viewReview,
 			review: &storage.Review{
-				ID:        10,
-				Output:    "Line 1\n\nLine 2\n\nLine 3",
-				Addressed: true,
+				ID:     10,
+				Output: "Line 1\n\nLine 2\n\nLine 3",
+				Closed: true,
 				Job: &storage.ReviewJob{
 					ID:       1,
 					GitRef:   "abc1234",
@@ -201,7 +201,7 @@ func TestTUIRenderViews(t *testing.T) {
 					Verdict:  nil,
 				},
 			},
-			wantContains:              []string{"Review", "abc1234", "[ADDRESSED]"},
+			wantContains:              []string{"Review", "abc1234", "[CLOSED]"},
 			checkContentStartsOnLine4: true,
 			checkNoVerdictOnLine3:     true,
 		},
@@ -260,7 +260,7 @@ func TestTUIRenderViews(t *testing.T) {
 					}
 				}
 				if !foundContent {
-					t.Errorf("Content should contain 'Line 1' after addressed/verdict line, output:\n%s", output)
+					t.Errorf("Content should contain 'Line 1' after closed/verdict line, output:\n%s", output)
 				}
 			}
 			if tt.checkNoVerdictOnLine3 {
@@ -287,7 +287,7 @@ func TestTUIVisibleLinesCalculationTable(t *testing.T) {
 		jobRepoName              string
 		jobAgent                 string
 		jobVerdict               *string
-		addressed                bool
+		closed                   bool
 		wantVisibleLines         int
 		wantContains             []string
 		checkVisibleContentCount bool
@@ -340,19 +340,19 @@ func TestTUIVisibleLinesCalculationTable(t *testing.T) {
 			jobRepoName:      "very-long-repository-name-here",
 			jobAgent:         "claude-code",
 			jobVerdict:       nil,
-			addressed:        true,
+			closed:           true,
 			wantVisibleLines: 3, // height 12 - 9 non-content = 3
-			wantContains:     []string{"very-long-repository-name-here", "feature/very-long-branch-name", "[ADDRESSED]"},
+			wantContains:     []string{"very-long-repository-name-here", "feature/very-long-branch-name", "[CLOSED]"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			review := &storage.Review{
-				ID:        10,
-				Output:    "L1\nL2\nL3\nL4\nL5\nL6\nL7\nL8\nL9\nL10\nL11\nL12\nL13\nL14\nL15\nL16\nL17\nL18\nL19\nL20",
-				Addressed: tt.addressed,
-				Agent:     tt.reviewAgent,
+				ID:     10,
+				Output: "L1\nL2\nL3\nL4\nL5\nL6\nL7\nL8\nL9\nL10\nL11\nL12\nL13\nL14\nL15\nL16\nL17\nL18\nL19\nL20",
+				Closed: tt.closed,
+				Agent:  tt.reviewAgent,
 				Job: &storage.ReviewJob{
 					ID:       1,
 					GitRef:   tt.jobRef,

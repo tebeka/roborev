@@ -106,25 +106,25 @@ func TestTUIMultiPathFilterStatusCounts(t *testing.T) {
 	addrFalse := false
 
 	m.jobs = []storage.ReviewJob{
-		{ID: 1, RepoPath: "/path/to/backend-dev", Status: storage.JobStatusDone, Addressed: &addrTrue},
-		{ID: 2, RepoPath: "/path/to/backend-prod", Status: storage.JobStatusDone, Addressed: &addrFalse},
-		{ID: 3, RepoPath: "/path/to/backend-prod", Status: storage.JobStatusDone, Addressed: &addrFalse},
-		{ID: 4, RepoPath: "/path/to/frontend", Status: storage.JobStatusDone, Addressed: &addrTrue},
-		{ID: 5, RepoPath: "/path/to/frontend", Status: storage.JobStatusDone, Addressed: &addrTrue},
+		{ID: 1, RepoPath: "/path/to/backend-dev", Status: storage.JobStatusDone, Closed: &addrTrue},
+		{ID: 2, RepoPath: "/path/to/backend-prod", Status: storage.JobStatusDone, Closed: &addrFalse},
+		{ID: 3, RepoPath: "/path/to/backend-prod", Status: storage.JobStatusDone, Closed: &addrFalse},
+		{ID: 4, RepoPath: "/path/to/frontend", Status: storage.JobStatusDone, Closed: &addrTrue},
+		{ID: 5, RepoPath: "/path/to/frontend", Status: storage.JobStatusDone, Closed: &addrTrue},
 	}
 
 	m.activeRepoFilter = []string{"/path/to/backend-dev", "/path/to/backend-prod"}
 
 	output := m.renderQueueView()
 
-	if !strings.Contains(output, "Done: 3") {
-		t.Errorf("Expected status to show 'Done: 3' for filtered repos, got: %s", output)
+	if !strings.Contains(output, "Completed: 3") {
+		t.Errorf("Expected status to show 'Completed: 3' for filtered repos, got: %s", output)
 	}
-	if !strings.Contains(output, "Addressed: 1") {
-		t.Errorf("Expected status to show 'Addressed: 1' for filtered repos, got: %s", output)
+	if !strings.Contains(output, "Closed: 1") {
+		t.Errorf("Expected status to show 'Closed: 1' for filtered repos, got: %s", output)
 	}
-	if !strings.Contains(output, "Unaddressed: 2") {
-		t.Errorf("Expected status to show 'Unaddressed: 2' for filtered repos, got: %s", output)
+	if !strings.Contains(output, "Open: 2") {
+		t.Errorf("Expected status to show 'Open: 2' for filtered repos, got: %s", output)
 	}
 }
 
@@ -429,7 +429,7 @@ func TestTUIActionsNoOpWithZeroVisibleJobs(t *testing.T) {
 
 	_, cmd = pressKey(m, 'a')
 	if cmd != nil {
-		t.Error("Expected no command for address with no visible jobs")
+		t.Error("Expected no command for close with no visible jobs")
 	}
 }
 

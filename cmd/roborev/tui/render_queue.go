@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"maps"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -17,7 +18,7 @@ import (
 )
 
 func (m model) getVisibleJobs() []storage.ReviewJob {
-	if len(m.activeRepoFilter) == 0 && m.activeBranchFilter == "" && !m.hideAddressed {
+	if len(m.activeRepoFilter) == 0 && m.activeBranchFilter == "" && !m.hideClosed {
 		return m.jobs
 	}
 	var visible []storage.ReviewJob
@@ -31,10 +32,10 @@ func (m model) getVisibleJobs() []storage.ReviewJob {
 func (m model) queueHelpRows() [][]helpItem {
 	row1 := []helpItem{
 		{"x", "cancel"}, {"r", "rerun"}, {"l", "log"}, {"p", "prompt"},
-		{"c", "comment"}, {"y", "copy"}, {"m", "commit msg"}, {"F", "fix"}, {"o", "options"},
+		{"c", "comment"}, {"y", "copy"}, {"m", "commit"}, {"F", "fix"}, {"o", "options"},
 	}
 	row2 := []helpItem{
-		{"↑/↓", "nav"}, {"↵", "review"}, {"a", "handled"},
+		{"↑/↓", "nav"}, {"↵", "review"}, {"a", "close"},
 	}
 	if !m.lockedRepoFilter || !m.lockedBranchFilter {
 		row2 = append(row2, helpItem{"f", "filter"})
@@ -71,7 +72,7 @@ func (m model) getVisibleSelectedIdx() int {
 	if m.selectedIdx < 0 {
 		return -1
 	}
-	if len(m.activeRepoFilter) == 0 && m.activeBranchFilter == "" && !m.hideAddressed {
+	if len(m.activeRepoFilter) == 0 && m.activeBranchFilter == "" && !m.hideClosed {
 		return m.selectedIdx
 	}
 	count := 0
@@ -94,11 +95,10 @@ const (
 	colBranch         // Branch name
 	colRepo           // Repository display name
 	colAgent          // Agent name
-	colStatus         // Job status
 	colQueued         // Enqueue timestamp
 	colElapsed        // Elapsed time
-	colPF             // Pass/Fail verdict
-	colHandled        // Addressed status
+	colStatus         // Job status (combined with verdict)
+	colHandled        // Done status
 	colCount          // total number of columns
 )
 
@@ -122,8 +122,8 @@ func (m model) renderQueueView() string {
 			}
 		}
 	}
-	if m.hideAddressed {
-		title.WriteString(" [hiding addressed]")
+	if m.hideClosed {
+		title.WriteString(" [hiding closed]")
 	}
 	b.WriteString(titleStyle.Render(title.String()))
 	// In compact mode, show version mismatch inline since the status area is hidden
@@ -137,7 +137,7 @@ func (m model) renderQueueView() string {
 		// Status line - use server-side aggregate counts for paginated views,
 		// fall back to client-side counting for multi-repo filters (which load all jobs)
 		var statusLine string
-		var done, addressed, unaddressed int
+		var done, closed, open int
 		if len(m.activeRepoFilter) > 1 || m.activeBranchFilter == branchNone {
 			// Client-side filtered views load all jobs, so count locally
 			for _, job := range m.jobs {
@@ -149,28 +149,28 @@ func (m model) renderQueueView() string {
 				}
 				if job.Status == storage.JobStatusDone {
 					done++
-					if job.Addressed != nil {
-						if *job.Addressed {
-							addressed++
+					if job.Closed != nil {
+						if *job.Closed {
+							closed++
 						} else {
-							unaddressed++
+							open++
 						}
 					}
 				}
 			}
 		} else {
 			done = m.jobStats.Done
-			addressed = m.jobStats.Addressed
-			unaddressed = m.jobStats.Unaddressed
+			closed = m.jobStats.Closed
+			open = m.jobStats.Open
 		}
 		if len(m.activeRepoFilter) > 0 || m.activeBranchFilter != "" {
-			statusLine = fmt.Sprintf("Daemon: %s | Done: %d | Addressed: %d | Unaddressed: %d",
-				m.daemonVersion, done, addressed, unaddressed)
+			statusLine = fmt.Sprintf("Daemon: %s | Completed: %d | Closed: %d | Open: %d",
+				m.daemonVersion, done, closed, open)
 		} else {
-			statusLine = fmt.Sprintf("Daemon: %s | Workers: %d/%d | Done: %d | Addressed: %d | Unaddressed: %d",
+			statusLine = fmt.Sprintf("Daemon: %s | Workers: %d/%d | Completed: %d | Closed: %d | Open: %d",
 				m.daemonVersion,
 				m.status.ActiveWorkers, m.status.MaxWorkers,
-				done, addressed, unaddressed)
+				done, closed, open)
 		}
 		b.WriteString(statusStyle.Render(statusLine))
 		b.WriteString("\x1b[K\n") // Clear status line
@@ -202,7 +202,7 @@ func (m model) renderQueueView() string {
 		if m.loadingJobs || m.loadingMore {
 			b.WriteString("Loading...")
 			b.WriteString("\x1b[K\n")
-		} else if len(m.activeRepoFilter) > 0 || m.hideAddressed {
+		} else if len(m.activeRepoFilter) > 0 || m.hideClosed {
 			b.WriteString("No jobs matching filters")
 			b.WriteString("\x1b[K\n")
 		} else {
@@ -248,7 +248,7 @@ func (m model) renderQueueView() string {
 		visCols := m.visibleColumns()
 
 		// Compute per-column max content widths, using cache when data hasn't changed.
-		allHeaders := [colCount]string{"", "JobID", "Ref", "Branch", "Repo", "Agent", "Status", "Queued", "Elapsed", "P/F", "Handled"}
+		allHeaders := [colCount]string{"", "JobID", "Ref", "Branch", "Repo", "Agent", "Queued", "Elapsed", "Status", "Closed"}
 		allFullRows := make([][]string, len(visibleJobList))
 		for i, job := range visibleJobList {
 			cells := m.jobCells(job)
@@ -298,11 +298,10 @@ func (m model) renderQueueView() string {
 		fixedWidth := map[int]int{
 			colSel:     2,
 			colJobID:   idWidth,
-			colStatus:  8,
+			colStatus:  8, // fits "Canceled" (8), "Running" (7), etc.
 			colQueued:  12,
 			colElapsed: 8,
-			colPF:      3,
-			colHandled: max(contentWidth[colHandled], 7),        // "Handled" header = 7
+			colHandled: max(contentWidth[colHandled], 6),        // "Closed" header = 6
 			colAgent:   min(max(contentWidth[colAgent], 5), 12), // "Agent" header = 5, cap at 12
 		}
 
@@ -492,30 +491,11 @@ func (m model) renderQueueView() string {
 					job := windowJobs[row]
 					switch logicalCol {
 					case colStatus:
-						switch job.Status {
-						case storage.JobStatusQueued:
-							s = s.Foreground(queuedStyle.GetForeground())
-						case storage.JobStatusRunning:
-							s = s.Foreground(runningStyle.GetForeground())
-						case storage.JobStatusDone:
-							s = s.Foreground(doneStyle.GetForeground())
-						case storage.JobStatusFailed:
-							s = s.Foreground(failedStyle.GetForeground())
-						case storage.JobStatusCanceled:
-							s = s.Foreground(canceledStyle.GetForeground())
-						}
-					case colPF:
-						if job.Verdict != nil {
-							if *job.Verdict == "P" {
-								s = s.Foreground(passStyle.GetForeground())
-							} else {
-								s = s.Foreground(failStyle.GetForeground())
-							}
-						}
+						s = s.Foreground(combinedStatusColor(job))
 					case colHandled:
-						if job.Addressed != nil {
-							if *job.Addressed {
-								s = s.Foreground(addressedStyle.GetForeground())
+						if job.Closed != nil {
+							if *job.Closed {
+								s = s.Foreground(closedStyle.GetForeground())
 							} else {
 								s = s.Foreground(queuedStyle.GetForeground())
 							}
@@ -595,8 +575,8 @@ func (m model) renderQueueView() string {
 }
 
 // jobCells returns plain text cell values for a job row.
-// Order: ref, branch, repo, agent, status, queued, elapsed, verdict, handled
-// (colRef through colHandled, 9 values).
+// Order: ref, branch, repo, agent, status, queued, elapsed, handled
+// (colRef through colHandled, 8 values).
 func (m model) jobCells(job storage.ReviewJob) []string {
 	ref := shortJobRef(job)
 	if !config.IsDefaultReviewType(job.ReviewType) {
@@ -626,23 +606,73 @@ func (m model) jobCells(job storage.ReviewJob) []string {
 		}
 	}
 
-	status := string(job.Status)
-
-	verdict := "-"
-	if job.Verdict != nil {
-		verdict = *job.Verdict
-	}
+	status := combinedStatus(job)
 
 	handled := ""
-	if job.Addressed != nil {
-		if *job.Addressed {
+	if job.Closed != nil {
+		if *job.Closed {
 			handled = "yes"
 		} else {
 			handled = "no"
 		}
 	}
 
-	return []string{ref, branch, repo, agentName, status, enqueued, elapsed, verdict, handled}
+	return []string{ref, branch, repo, agentName, enqueued, elapsed, status, handled}
+}
+
+// combinedStatus returns a display string that merges job status
+// with verdict: Queued, Running, Error, Canceled, Pass, Fail, or
+// Done (for task/fix jobs that have no verdict).
+func combinedStatus(job storage.ReviewJob) string {
+	switch job.Status {
+	case storage.JobStatusQueued:
+		return "Queued"
+	case storage.JobStatusRunning:
+		return "Running"
+	case storage.JobStatusFailed:
+		return "Error"
+	case storage.JobStatusCanceled:
+		return "Canceled"
+	case storage.JobStatusDone, storage.JobStatusApplied,
+		storage.JobStatusRebased:
+		if job.Verdict != nil {
+			if *job.Verdict == "P" {
+				return "Pass"
+			}
+			return "Fail"
+		}
+		return "Done"
+	default:
+		return string(job.Status)
+	}
+}
+
+// combinedStatusColor returns the foreground color for the
+// combined status column based on job state and verdict.
+func combinedStatusColor(
+	job storage.ReviewJob,
+) lipgloss.TerminalColor {
+	switch job.Status {
+	case storage.JobStatusQueued:
+		return queuedStyle.GetForeground()
+	case storage.JobStatusRunning:
+		return runningStyle.GetForeground()
+	case storage.JobStatusFailed:
+		return failedStyle.GetForeground()
+	case storage.JobStatusCanceled:
+		return canceledStyle.GetForeground()
+	case storage.JobStatusDone, storage.JobStatusApplied,
+		storage.JobStatusRebased:
+		if job.Verdict == nil {
+			return readyStyle.GetForeground()
+		}
+		if *job.Verdict != "P" {
+			return failStyle.GetForeground()
+		}
+		return passStyle.GetForeground()
+	default:
+		return queuedStyle.GetForeground()
+	}
 }
 
 // commandLineForJob computes the representative agent command line from job parameters.
@@ -678,9 +708,35 @@ func stripControlChars(s string) string {
 	return b.String()
 }
 
+// migrateColumnConfig resets stale column_order and hidden_columns
+// entries so users pick up the current default layout. Returns true
+// if the config was modified and should be saved.
+func migrateColumnConfig(cfg *config.Config) bool {
+	dirty := false
+	// Pre-rename config: "addressed" → reset
+	if slices.Contains(cfg.ColumnOrder, "addressed") {
+		cfg.ColumnOrder = nil
+		dirty = true
+	}
+	if slices.Contains(cfg.HiddenColumns, "addressed") {
+		cfg.HiddenColumns = nil
+		dirty = true
+	}
+	// Old default order (status before queued) → reset
+	oldDefault := []string{
+		"ref", "branch", "repo", "agent",
+		"status", "queued", "elapsed", "closed",
+	}
+	if slices.Equal(cfg.ColumnOrder, oldDefault) {
+		cfg.ColumnOrder = nil
+		dirty = true
+	}
+	return dirty
+}
+
 // toggleableColumns is the ordered list of columns the user can show/hide.
 // colSel and colJobID are always visible and not included here.
-var toggleableColumns = []int{colRef, colBranch, colRepo, colAgent, colStatus, colQueued, colElapsed, colPF, colHandled}
+var toggleableColumns = []int{colRef, colBranch, colRepo, colAgent, colQueued, colElapsed, colStatus, colHandled}
 
 // columnNames maps column constants to display names.
 var columnNames = map[int]string{
@@ -691,8 +747,7 @@ var columnNames = map[int]string{
 	colStatus:  "Status",
 	colQueued:  "Queued",
 	colElapsed: "Elapsed",
-	colPF:      "P/F",
-	colHandled: "Handled",
+	colHandled: "Closed",
 }
 
 // columnConfigNames maps column constants to config file names (lowercase).
@@ -704,8 +759,7 @@ var columnConfigNames = map[int]string{
 	colStatus:  "status",
 	colQueued:  "queued",
 	colElapsed: "elapsed",
-	colPF:      "pf",
-	colHandled: "handled",
+	colHandled: "closed",
 }
 
 // drainFlexOverflow reduces flex column widths to absorb overflow,
@@ -832,11 +886,19 @@ func (m model) visibleColumns() []int {
 }
 
 // saveColumnOptions persists hidden columns, border settings, and column order to config.
+// Column order is only saved when it differs from the built-in default,
+// so future default changes take effect for users who haven't customized.
 func (m model) saveColumnOptions() tea.Cmd {
 	hidden := hiddenColumnsToNames(m.hiddenColumns)
 	borders := m.colBordersOn
-	colOrd := columnOrderToNames(m.columnOrder)
-	taskColOrd := taskColumnOrderToNames(m.taskColumnOrder)
+	var colOrd []string
+	if !slices.Equal(m.columnOrder, toggleableColumns) {
+		colOrd = columnOrderToNames(m.columnOrder)
+	}
+	var taskColOrd []string
+	if !slices.Equal(m.taskColumnOrder, taskToggleableColumns) {
+		taskColOrd = taskColumnOrderToNames(m.taskColumnOrder)
+	}
 	return func() tea.Msg {
 		cfg, err := config.LoadGlobal()
 		if err != nil {

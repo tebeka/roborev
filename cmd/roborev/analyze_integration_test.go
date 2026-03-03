@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -197,8 +198,8 @@ func TestRunAnalyzeAndFix_Integration(t *testing.T) {
 	if atomic.LoadInt32(&state.ReviewCount) == 0 {
 		t.Error("should have fetched the review")
 	}
-	if atomic.LoadInt32(&state.AddressCount) == 0 {
-		t.Error("should have marked job as addressed")
+	if atomic.LoadInt32(&state.CloseCount) == 0 {
+		t.Error("should have marked job as closed")
 	}
 
 	// Verify output contains analysis result
@@ -206,7 +207,7 @@ func TestRunAnalyzeAndFix_Integration(t *testing.T) {
 	if !strings.Contains(outputStr, "CODE SMELLS") {
 		t.Error("output should contain analysis result")
 	}
-	if !strings.Contains(outputStr, "marked as addressed") {
-		t.Error("output should confirm job was addressed")
+	if !regexp.MustCompile(`Analysis job \d+ closed`).MatchString(outputStr) {
+		t.Errorf("output should match 'Analysis job N closed', got: %s", outputStr)
 	}
 }

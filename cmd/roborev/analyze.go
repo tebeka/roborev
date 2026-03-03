@@ -108,7 +108,7 @@ Branch mode (--branch):
 
 Fix mode (--fix):
   Runs analysis, then invokes an agentic agent to apply the suggested changes.
-  The analysis is saved to the database and marked as addressed when complete.
+  The analysis is saved to the database and marked as closed when complete.
 
   roborev analyze refactor --fix ./...
   roborev analyze duplication --fix --fix-agent claude-code *.go
@@ -360,7 +360,7 @@ func runSingleAnalysis(cmd *cobra.Command, serverAddr string, repoRoot string, a
 		cmd.Printf("Enqueued analysis job %d (agent: %s)\n", job.ID, job.Agent)
 	}
 
-	// If --fix, we need to wait for analysis, run fixer, then mark addressed
+	// If --fix, we need to wait for analysis, run fixer, then mark closed
 	if opts.fix {
 		return runAnalyzeAndFix(cmd, serverAddr, repoRoot, job.ID, analysisType, opts)
 	}
@@ -536,7 +536,7 @@ func enqueueAnalysisJob(serverAddr string, repoRoot, prompt, outputPrefix, label
 	return &job, nil
 }
 
-// runAnalyzeAndFix waits for analysis to complete, runs a fixer agent, then marks addressed
+// runAnalyzeAndFix waits for analysis to complete, runs a fixer agent, then marks closed
 func runAnalyzeAndFix(cmd *cobra.Command, serverAddr, repoRoot string, jobID int64, analysisType *analyze.AnalysisType, opts analyzeOptions) error {
 	ctx := cmd.Context()
 	if ctx == nil {
@@ -648,14 +648,14 @@ func runAnalyzeAndFix(cmd *cobra.Command, serverAddr, repoRoot string, jobID int
 		}
 	}
 
-	// Mark the analysis as addressed
-	if err := markJobAddressed(serverAddr, jobID); err != nil {
+	// Close the analysis job
+	if err := markJobClosed(serverAddr, jobID); err != nil {
 		// Non-fatal - the fixes were applied, just couldn't update status
 		if !opts.quiet {
-			cmd.Printf("\nWarning: could not mark job as addressed: %v\n", err)
+			cmd.Printf("\nWarning: could not close job: %v\n", err)
 		}
 	} else if !opts.quiet {
-		cmd.Printf("Analysis job %d marked as addressed\n", jobID)
+		cmd.Printf("Analysis job %d closed\n", jobID)
 	}
 
 	return nil
@@ -844,14 +844,14 @@ func runFixAgent(cmd *cobra.Command, repoPath, agentName, model, reasoning, prom
 	return nil
 }
 
-// markJobAddressed marks a job as addressed via the API
-func markJobAddressed(serverAddr string, jobID int64) error {
+// markJobClosed closes a job via the API
+func markJobClosed(serverAddr string, jobID int64) error {
 	reqBody, _ := json.Marshal(map[string]any{
-		"job_id":    jobID,
-		"addressed": true,
+		"job_id": jobID,
+		"closed": true,
 	})
 
-	resp, err := http.Post(serverAddr+"/api/review/address", "application/json", bytes.NewReader(reqBody))
+	resp, err := http.Post(serverAddr+"/api/review/close", "application/json", bytes.NewReader(reqBody))
 	if err != nil {
 		return err
 	}
@@ -859,7 +859,7 @@ func markJobAddressed(serverAddr string, jobID int64) error {
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("mark addressed failed: %s", body)
+		return fmt.Errorf("close job failed: %s", body)
 	}
 	return nil
 }
