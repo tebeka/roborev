@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/lipgloss/table"
@@ -499,8 +500,9 @@ func (m model) renderPatchView() string {
 		label := "Save to: "
 		inputWidth := max(m.width-len(label)-2, 10)
 		display := m.savePatchInput
-		if len(display) > inputWidth {
-			display = display[len(display)-inputWidth:]
+		if size := utf8.RuneCountInString(display); size > inputWidth {
+			rs := []rune(display)
+			display = string(rs[size-inputWidth:])
 		}
 		display = display + strings.Repeat(" ", max(inputWidth-len(display), 0))
 		b.WriteString(helpStyle.Render(label) + display + "\x1b[K\n")
