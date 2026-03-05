@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -814,7 +815,14 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 
 	status := r.URL.Query().Get("status")
 	repo := r.URL.Query().Get("repo")
+	if repo != "" {
+		repo = filepath.ToSlash(filepath.Clean(repo))
+	}
 	gitRef := r.URL.Query().Get("git_ref")
+	repoPrefix := r.URL.Query().Get("repo_prefix")
+	if repoPrefix != "" {
+		repoPrefix = filepath.ToSlash(filepath.Clean(repoPrefix))
+	}
 
 	// Parse limit from query, default to 50, 0 means no limit
 	// Clamp to valid range: 0 (unlimited) or 1-10000
@@ -870,6 +878,9 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	if exJobType := r.URL.Query().Get("exclude_job_type"); exJobType != "" {
 		listOpts = append(listOpts, storage.WithExcludeJobType(exJobType))
 	}
+	if repoPrefix != "" && repo == "" {
+		listOpts = append(listOpts, storage.WithRepoPrefix(repoPrefix))
+	}
 
 	jobs, err := s.db.ListJobs(status, repo, fetchLimit, offset, listOpts...)
 	if err != nil {
@@ -893,6 +904,9 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 			statsOpts = append(statsOpts, storage.WithBranch(branch))
 		}
 	}
+	if repoPrefix != "" && repo == "" {
+		statsOpts = append(statsOpts, storage.WithRepoPrefix(repoPrefix))
+	}
 	stats, statsErr := s.db.CountJobStats(repo, statsOpts...)
 	if statsErr != nil {
 		log.Printf("Warning: failed to count job stats: %v", statsErr)
@@ -911,18 +925,20 @@ func (s *Server) handleListRepos(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Optional branch filter
 	branch := r.URL.Query().Get("branch")
-
-	var repos []storage.RepoWithCount
-	var totalCount int
-	var err error
-
-	if branch != "" {
-		repos, totalCount, err = s.db.ListReposWithReviewCountsByBranch(branch)
-	} else {
-		repos, totalCount, err = s.db.ListReposWithReviewCounts()
+	prefix := r.URL.Query().Get("prefix")
+	if prefix != "" {
+		prefix = filepath.ToSlash(filepath.Clean(prefix))
 	}
+
+	var repoOpts []storage.ListReposOption
+	if prefix != "" {
+		repoOpts = append(repoOpts, storage.WithRepoPathPrefix(prefix))
+	}
+	if branch != "" {
+		repoOpts = append(repoOpts, storage.WithRepoBranch(branch))
+	}
+	repos, totalCount, err := s.db.ListReposWithReviewCounts(repoOpts...)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("list repos: %v", err))
 		return
@@ -984,7 +1000,7 @@ func (s *Server) handleListBranches(w http.ResponseWriter, r *http.Request) {
 	var repoPaths []string
 	for _, p := range r.URL.Query()["repo"] {
 		if p != "" {
-			repoPaths = append(repoPaths, p)
+			repoPaths = append(repoPaths, filepath.ToSlash(filepath.Clean(p)))
 		}
 	}
 

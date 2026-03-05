@@ -13,11 +13,13 @@ import (
 // GetOrCreateRepo finds or creates a repo by its root path.
 // If identity is provided, it will be stored; otherwise the identity field remains NULL.
 func (db *DB) GetOrCreateRepo(rootPath string, identity ...string) (*Repo, error) {
-	// Normalize path
+	// Normalize path to forward slashes for consistent storage
+	// across platforms (LIKE queries use '/' as separator).
 	absPath, err := filepath.Abs(rootPath)
 	if err != nil {
 		return nil, err
 	}
+	absPath = filepath.ToSlash(absPath)
 
 	// Extract optional identity
 	var repoIdentity string
@@ -92,6 +94,7 @@ func (db *DB) GetRepoByPath(rootPath string) (*Repo, error) {
 	if err != nil {
 		return nil, err
 	}
+	absPath = filepath.ToSlash(absPath)
 
 	var repo Repo
 	var createdAt string
@@ -111,60 +114,83 @@ type RepoWithCount struct {
 	Count    int    `json:"count"`
 }
 
-// ListReposWithReviewCounts returns all repos with their total job counts
-func (db *DB) ListReposWithReviewCounts() ([]RepoWithCount, int, error) {
-	// Query repos with their job counts (includes queued/running, not just completed reviews)
-	rows, err := db.Query(`
-		SELECT r.name, r.root_path, COUNT(rj.id) as job_count
-		FROM repos r
-		LEFT JOIN review_jobs rj ON rj.repo_id = r.id
-		GROUP BY r.id, r.name, r.root_path
-		ORDER BY r.name
-	`)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer rows.Close()
+// ListReposOption configures filtering for ListReposWithReviewCounts.
+type ListReposOption func(*listReposOptions)
 
-	var repos []RepoWithCount
-	totalCount := 0
-	for rows.Next() {
-		var rc RepoWithCount
-		if err := rows.Scan(&rc.Name, &rc.RootPath, &rc.Count); err != nil {
-			return nil, 0, err
-		}
-		repos = append(repos, rc)
-		totalCount += rc.Count
-	}
-	return repos, totalCount, rows.Err()
+type listReposOptions struct {
+	prefix string
+	branch string
 }
 
-// ListReposWithReviewCountsByBranch returns repos filtered by branch with their job counts
-// If branch is empty, returns all repos. Use "(none)" to filter for jobs without a branch.
-func (db *DB) ListReposWithReviewCountsByBranch(branch string) ([]RepoWithCount, int, error) {
-	var rows *sql.Rows
-	var err error
+// WithRepoPathPrefix filters repos whose root_path starts with the given prefix.
+func WithRepoPathPrefix(prefix string) ListReposOption {
+	return func(o *listReposOptions) {
+		o.prefix = strings.TrimRight(prefix, "/")
+	}
+}
 
-	if branch == "" {
-		// No filter - return all repos
-		return db.ListReposWithReviewCounts()
+// WithRepoBranch filters repos to those having jobs on the given branch.
+// Use "(none)" to filter for jobs without a branch.
+func WithRepoBranch(branch string) ListReposOption {
+	return func(o *listReposOptions) { o.branch = branch }
+}
+
+// ListReposWithReviewCounts returns repos with their total job counts.
+// Options can filter by path prefix, branch, or both.
+func (db *DB) ListReposWithReviewCounts(opts ...ListReposOption) ([]RepoWithCount, int, error) {
+	var o listReposOptions
+	for _, opt := range opts {
+		opt(&o)
 	}
 
-	// Filter by branch (handle "(none)" as NULL/empty branch)
-	branchFilter := branch
-	if branch == "(none)" {
-		branchFilter = ""
+	// Branch filtering requires INNER JOIN + HAVING to exclude repos
+	// with no matching jobs. Without branch filter, LEFT JOIN shows all repos.
+	joinType := "LEFT"
+	if o.branch != "" {
+		joinType = "INNER"
 	}
 
-	rows, err = db.Query(`
+	query := fmt.Sprintf(`
 		SELECT r.name, r.root_path, COUNT(rj.id) as job_count
 		FROM repos r
-		INNER JOIN review_jobs rj ON rj.repo_id = r.id
-		WHERE COALESCE(rj.branch, '') = ?
+		%s JOIN review_jobs rj ON rj.repo_id = r.id
+	`, joinType)
+
+	var args []any
+	var conditions []string
+
+	if o.prefix != "" {
+		conditions = append(
+			conditions,
+			"r.root_path LIKE ? || '/%' ESCAPE '!'",
+		)
+		args = append(args, escapeLike(o.prefix))
+	}
+
+	if o.branch != "" {
+		branchFilter := o.branch
+		if o.branch == "(none)" {
+			branchFilter = ""
+		}
+		conditions = append(
+			conditions, "COALESCE(rj.branch, '') = ?",
+		)
+		args = append(args, branchFilter)
+	}
+
+	if len(conditions) > 0 {
+		query += " WHERE " + strings.Join(conditions, " AND ")
+	}
+
+	query += `
 		GROUP BY r.id, r.name, r.root_path
-		HAVING job_count > 0
-		ORDER BY r.name
-	`, branchFilter)
+	`
+	if o.branch != "" {
+		query += " HAVING job_count > 0"
+	}
+	query += " ORDER BY r.name"
+
+	rows, err := db.Query(query, args...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -268,6 +294,7 @@ func (db *DB) ListBranchesWithCounts(repoPaths []string) (*BranchListResult, err
 func (db *DB) RenameRepo(identifier, newName string) (int64, error) {
 	// Try to match by root_path first (absolute or relative), then by name
 	absPath, _ := filepath.Abs(identifier)
+	absPath = filepath.ToSlash(absPath)
 
 	// Try path match first
 	result, err := db.Exec(`UPDATE repos SET name = ? WHERE root_path = ?`, newName, absPath)

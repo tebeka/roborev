@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os/exec"
 	"path/filepath"
 	"testing"
@@ -150,6 +151,169 @@ func TestHandleListReposWithBranchFilter(t *testing.T) {
 		testutil.DecodeJSON(t, w, &response)
 		if response.TotalCount != 0 {
 			t.Errorf("Expected total_count 0 for nonexistent branch, got %d", response.TotalCount)
+		}
+	})
+}
+
+func TestHandleListReposWithPrefixFilter(t *testing.T) {
+	server, db, tmpDir := newTestServer(t)
+
+	// Create repos under a "workspace" parent and one outside it
+	workspace := filepath.Join(tmpDir, "workspace")
+	seedRepoWithJobs(t, db, filepath.Join(workspace, "repo1"), 3, "repo1")
+	seedRepoWithJobs(t, db, filepath.Join(workspace, "repo2"), 2, "repo2")
+	seedRepoWithJobs(t, db, filepath.Join(tmpDir, "other-repo"), 1, "other")
+
+	type reposResponse struct {
+		Repos      []struct{ Name string } `json:"repos"`
+		TotalCount int                     `json:"total_count"`
+	}
+
+	t.Run("prefix returns only child repos", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/repos?prefix="+url.QueryEscape(workspace), nil)
+		w := httptest.NewRecorder()
+		server.handleListRepos(w, req)
+		testutil.AssertStatusCode(t, w, http.StatusOK)
+
+		var response reposResponse
+		testutil.DecodeJSON(t, w, &response)
+		if len(response.Repos) != 2 {
+			t.Errorf("Expected 2 repos under workspace, got %d", len(response.Repos))
+		}
+		if response.TotalCount != 5 {
+			t.Errorf("Expected total_count 5, got %d", response.TotalCount)
+		}
+	})
+
+	t.Run("prefix excludes non-matching repos", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/repos?prefix="+url.QueryEscape(filepath.Join(tmpDir, "nonexistent")), nil)
+		w := httptest.NewRecorder()
+		server.handleListRepos(w, req)
+		testutil.AssertStatusCode(t, w, http.StatusOK)
+
+		var response reposResponse
+		testutil.DecodeJSON(t, w, &response)
+		if len(response.Repos) != 0 {
+			t.Errorf("Expected 0 repos for nonexistent prefix, got %d", len(response.Repos))
+		}
+	})
+
+	// Set branches on workspace repos: repo1 jobs 1,2=main, 3=feature; repo2 jobs 4,5=main
+	setJobBranch(t, db, 1, "main")
+	setJobBranch(t, db, 2, "main")
+	setJobBranch(t, db, 3, "feature")
+	setJobBranch(t, db, 4, "main")
+	setJobBranch(t, db, 5, "main")
+
+	t.Run("prefix + branch combined filter", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet,
+			"/api/repos?prefix="+url.QueryEscape(workspace)+"&branch=main", nil)
+		w := httptest.NewRecorder()
+		server.handleListRepos(w, req)
+		testutil.AssertStatusCode(t, w, http.StatusOK)
+
+		var response reposResponse
+		testutil.DecodeJSON(t, w, &response)
+		if len(response.Repos) != 2 {
+			t.Errorf("Expected 2 repos with prefix+branch=main, got %d", len(response.Repos))
+		}
+		if response.TotalCount != 4 {
+			t.Errorf("Expected total_count 4, got %d", response.TotalCount)
+		}
+	})
+
+	t.Run("prefix + feature branch narrows results", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet,
+			"/api/repos?prefix="+url.QueryEscape(workspace)+"&branch=feature", nil)
+		w := httptest.NewRecorder()
+		server.handleListRepos(w, req)
+		testutil.AssertStatusCode(t, w, http.StatusOK)
+
+		var response reposResponse
+		testutil.DecodeJSON(t, w, &response)
+		if len(response.Repos) != 1 {
+			t.Errorf("Expected 1 repo with prefix+branch=feature, got %d", len(response.Repos))
+		}
+		if response.TotalCount != 1 {
+			t.Errorf("Expected total_count 1, got %d", response.TotalCount)
+		}
+	})
+
+	t.Run("prefix with trailing slash is normalized", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet,
+			"/api/repos?prefix="+url.QueryEscape(workspace+"/"), nil)
+		w := httptest.NewRecorder()
+		server.handleListRepos(w, req)
+		testutil.AssertStatusCode(t, w, http.StatusOK)
+
+		var response reposResponse
+		testutil.DecodeJSON(t, w, &response)
+		if len(response.Repos) != 2 {
+			t.Errorf("Expected 2 repos with trailing-slash prefix, got %d", len(response.Repos))
+		}
+	})
+
+	t.Run("prefix with dot-dot is normalized", func(t *testing.T) {
+		dotdotPrefix := workspace + "/../" + filepath.Base(workspace)
+		req := httptest.NewRequest(http.MethodGet,
+			"/api/repos?prefix="+url.QueryEscape(dotdotPrefix), nil)
+		w := httptest.NewRecorder()
+		server.handleListRepos(w, req)
+		testutil.AssertStatusCode(t, w, http.StatusOK)
+
+		var response reposResponse
+		testutil.DecodeJSON(t, w, &response)
+		if len(response.Repos) != 2 {
+			t.Errorf("Expected 2 repos with dot-dot prefix, got %d", len(response.Repos))
+		}
+	})
+}
+
+func TestHandleListReposSlashNormalization(t *testing.T) {
+	server, db, tmpDir := newTestServer(t)
+
+	// Store repos with forward-slash paths (matching ToSlash output)
+	ws := filepath.ToSlash(tmpDir) + "/slash-ws"
+	seedRepoWithJobs(t, db, ws+"/repo-x", 2, "rx")
+	seedRepoWithJobs(t, db, ws+"/repo-y", 1, "ry")
+	seedRepoWithJobs(t, db, filepath.ToSlash(tmpDir)+"/other-z", 1, "rz")
+
+	type repoEntry struct {
+		Name     string `json:"name"`
+		RootPath string `json:"root_path"`
+	}
+	type reposResponse struct {
+		Repos      []repoEntry `json:"repos"`
+		TotalCount int         `json:"total_count"`
+	}
+
+	t.Run("forward-slash prefix matches stored paths", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet,
+			"/api/repos?prefix="+url.QueryEscape(ws), nil)
+		w := httptest.NewRecorder()
+		server.handleListRepos(w, req)
+		testutil.AssertStatusCode(t, w, http.StatusOK)
+
+		var response reposResponse
+		testutil.DecodeJSON(t, w, &response)
+		if len(response.Repos) != 2 {
+			t.Errorf(
+				"Expected 2 repos with forward-slash prefix, got %d",
+				len(response.Repos),
+			)
+		}
+		if response.TotalCount != 3 {
+			t.Errorf("Expected total_count 3, got %d", response.TotalCount)
+		}
+		names := make(map[string]bool)
+		for _, r := range response.Repos {
+			names[r.Name] = true
+		}
+		if !names["repo-x"] || !names["repo-y"] {
+			t.Errorf("Expected repo-x and repo-y, got %v", response.Repos)
+		}
+		if names["other-z"] {
+			t.Error("other-z should not be in prefix-filtered results")
 		}
 	})
 }

@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/roborev-dev/roborev/internal/agent"
 	"github.com/roborev-dev/roborev/internal/config"
@@ -79,6 +82,17 @@ Examples:
 			if err != nil {
 				if quiet {
 					return nil // Not a repo - silent exit for hooks
+				}
+				// Scan for child git repos to give a helpful hint
+				if children := findChildGitRepos(repoPath); len(children) > 0 {
+					absDir, _ := filepath.Abs(repoPath)
+					var b strings.Builder
+					b.WriteString("not in a git repository; use --repo to specify one:")
+					for _, name := range children {
+						b.WriteString("\n  roborev review --repo ")
+						b.WriteString(filepath.Join(absDir, name))
+					}
+					return fmt.Errorf("%s", b.String())
 				}
 				return fmt.Errorf("not a git repository: %w", err)
 			}
@@ -410,4 +424,23 @@ func runLocalReview(cmd *cobra.Command, repoPath, gitRef, diffContent, agentName
 		fmt.Fprintln(out) // Final newline
 	}
 	return nil
+}
+
+// findChildGitRepos returns the names of immediate child directories that are git repos.
+func findChildGitRepos(dir string) []string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var repos []string
+	for _, e := range entries {
+		if !e.IsDir() || e.Name()[0] == '.' {
+			continue
+		}
+		gitDir := filepath.Join(dir, e.Name(), ".git")
+		if _, err := os.Stat(gitDir); err == nil {
+			repos = append(repos, e.Name())
+		}
+	}
+	return repos
 }

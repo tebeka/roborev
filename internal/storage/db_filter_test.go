@@ -682,9 +682,9 @@ func TestListReposWithReviewCountsByBranch(t *testing.T) {
 	setJobBranch(t, db, job2.ID, "feature")
 
 	t.Run("filter by main branch", func(t *testing.T) {
-		repos, totalCount, err := db.ListReposWithReviewCountsByBranch("main")
+		repos, totalCount, err := db.ListReposWithReviewCounts(WithRepoBranch("main"))
 		if err != nil {
-			t.Fatalf("ListReposWithReviewCountsByBranch failed: %v", err)
+			t.Fatalf("ListReposWithReviewCounts(branch=main) failed: %v", err)
 		}
 		if len(repos) != 2 {
 			t.Errorf("Expected 2 repos with main branch, got %d", len(repos))
@@ -695,9 +695,9 @@ func TestListReposWithReviewCountsByBranch(t *testing.T) {
 	})
 
 	t.Run("filter by feature branch", func(t *testing.T) {
-		repos, totalCount, err := db.ListReposWithReviewCountsByBranch("feature")
+		repos, totalCount, err := db.ListReposWithReviewCounts(WithRepoBranch("feature"))
 		if err != nil {
-			t.Fatalf("ListReposWithReviewCountsByBranch failed: %v", err)
+			t.Fatalf("ListReposWithReviewCounts(branch=feature) failed: %v", err)
 		}
 		if len(repos) != 1 {
 			t.Errorf("Expected 1 repo with feature branch, got %d", len(repos))
@@ -712,9 +712,9 @@ func TestListReposWithReviewCountsByBranch(t *testing.T) {
 		commit4 := createCommit(t, db, repo1.ID, "jkl012")
 		enqueueJob(t, db, repo1.ID, commit4.ID, "jkl012")
 
-		repos, totalCount, err := db.ListReposWithReviewCountsByBranch("(none)")
+		repos, totalCount, err := db.ListReposWithReviewCounts(WithRepoBranch("(none)"))
 		if err != nil {
-			t.Fatalf("ListReposWithReviewCountsByBranch failed: %v", err)
+			t.Fatalf("ListReposWithReviewCounts(branch=(none)) failed: %v", err)
 		}
 		if len(repos) != 1 {
 			t.Errorf("Expected 1 repo with (none) branch, got %d", len(repos))
@@ -725,9 +725,9 @@ func TestListReposWithReviewCountsByBranch(t *testing.T) {
 	})
 
 	t.Run("empty filter returns all", func(t *testing.T) {
-		repos, _, err := db.ListReposWithReviewCountsByBranch("")
+		repos, _, err := db.ListReposWithReviewCounts()
 		if err != nil {
-			t.Fatalf("ListReposWithReviewCountsByBranch failed: %v", err)
+			t.Fatalf("ListReposWithReviewCounts() failed: %v", err)
 		}
 		if len(repos) != 2 {
 			t.Errorf("Expected 2 repos, got %d", len(repos))
@@ -916,4 +916,288 @@ func TestListJobsWithJobTypeFilter(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestEscapeLike(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"plain", "plain"},
+		{"100%", "100!%"},
+		{"under_score", "under!_score"},
+		{"has!bang", "has!!bang"},
+		{`C:\Users\foo`, `C:\Users\foo`},
+		{"combo!_%", "combo!!!_!%"},
+	}
+	for _, tt := range tests {
+		got := escapeLike(tt.input)
+		if got != tt.want {
+			t.Errorf(
+				"escapeLike(%q) = %q, want %q",
+				tt.input, got, tt.want,
+			)
+		}
+	}
+}
+
+func TestPrefixFilterWithSpecialChars(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+
+	// Use t.TempDir() so paths are absolute on all platforms.
+	base := t.TempDir()
+	workspace := filepath.Join(base, "workspace")
+	other := filepath.Join(base, "other")
+	wsPrefix := filepath.ToSlash(workspace)
+	otherPrefix := filepath.ToSlash(other)
+
+	// Create repos with LIKE-special chars in path
+	createRepo(t, db, filepath.Join(workspace, "repo_one"))
+	createRepo(t, db, filepath.Join(workspace, "repo%two"))
+	createRepo(t, db, filepath.Join(other, "repo"))
+
+	// Add a job to each repo
+	repo1, _ := db.GetRepoByPath(filepath.Join(workspace, "repo_one"))
+	commit1 := createCommit(t, db, repo1.ID, "sha1")
+	enqueueJob(t, db, repo1.ID, commit1.ID, "sha1")
+
+	repo2, _ := db.GetRepoByPath(filepath.Join(workspace, "repo%two"))
+	commit2 := createCommit(t, db, repo2.ID, "sha2")
+	enqueueJob(t, db, repo2.ID, commit2.ID, "sha2")
+
+	repo3, _ := db.GetRepoByPath(filepath.Join(other, "repo"))
+	commit3 := createCommit(t, db, repo3.ID, "sha3")
+	enqueueJob(t, db, repo3.ID, commit3.ID, "sha3")
+
+	t.Run("prefix with underscore matches correctly", func(t *testing.T) {
+		jobs, err := db.ListJobs(
+			"", "", 50, 0, WithRepoPrefix(wsPrefix),
+		)
+		if err != nil {
+			t.Fatalf("ListJobs failed: %v", err)
+		}
+		if len(jobs) != 2 {
+			t.Errorf("Expected 2 jobs under workspace, got %d", len(jobs))
+		}
+	})
+
+	t.Run("prefix filter excludes non-matching", func(t *testing.T) {
+		jobs, err := db.ListJobs(
+			"", "", 50, 0, WithRepoPrefix(otherPrefix),
+		)
+		if err != nil {
+			t.Fatalf("ListJobs failed: %v", err)
+		}
+		if len(jobs) != 1 {
+			t.Errorf("Expected 1 job under other, got %d", len(jobs))
+		}
+	})
+
+	// Complete workspace jobs so CountJobStats has done counts to verify.
+	// repo1 (repo_one) job -> done, repo2 (repo%two) job -> done,
+	// repo3 (other) job -> done (outside prefix).
+	for range 3 {
+		claimed := claimJob(t, db, "w1")
+		if err := db.CompleteJob(claimed.ID, "codex", "p", "o"); err != nil {
+			t.Fatalf("CompleteJob failed: %v", err)
+		}
+	}
+
+	t.Run("CountJobStats with special-char prefix", func(t *testing.T) {
+		stats, err := db.CountJobStats(
+			"", WithRepoPrefix(wsPrefix),
+		)
+		if err != nil {
+			t.Fatalf("CountJobStats failed: %v", err)
+		}
+		// 2 done jobs under workspace (repo_one + repo%two),
+		// not 3 (repo3 is under other).
+		if stats.Done != 2 {
+			t.Errorf("Expected 2 done under prefix, got %d", stats.Done)
+		}
+		if stats.Open != 2 {
+			t.Errorf("Expected 2 open under prefix, got %d", stats.Open)
+		}
+	})
+
+	t.Run("ListReposWithReviewCounts with special-char prefix", func(t *testing.T) {
+		repos, total, err := db.ListReposWithReviewCounts(
+			WithRepoPathPrefix(wsPrefix),
+		)
+		if err != nil {
+			t.Fatalf("ListReposWithReviewCounts failed: %v", err)
+		}
+		if len(repos) != 2 {
+			t.Errorf("Expected 2 repos, got %d", len(repos))
+		}
+		if total != 2 {
+			t.Errorf("Expected total 2, got %d", total)
+		}
+	})
+
+	t.Run("backslash in path does not cause SQL error", func(t *testing.T) {
+		// Verify that backslashes in paths are passed through correctly
+		// to LIKE (no longer escaped as ESCAPE char). The LIKE pattern
+		// uses '/' as separator so Windows-native paths with '\' won't
+		// match the prefix filter — on Windows, filepath.ToSlash should
+		// normalize paths before storage. This test ensures no SQL errors.
+		createRepo(t, db, `C:\Users\dev\workspace\project-a`)
+		rA, _ := db.GetRepoByPath(`C:\Users\dev\workspace\project-a`)
+		cA := createCommit(t, db, rA.ID, "win-a")
+		enqueueJob(t, db, rA.ID, cA.ID, "win-a")
+
+		// Should not error — the old '\' ESCAPE char would have
+		// caused invalid escape sequences with Windows paths.
+		_, err := db.ListJobs(
+			"", "", 50, 0, WithRepoPrefix(`C:\Users\dev\workspace`),
+		)
+		if err != nil {
+			t.Fatalf("ListJobs with backslash prefix should not error: %v", err)
+		}
+
+		_, err = db.CountJobStats(
+			"", WithRepoPrefix(`C:\Users\dev\workspace`),
+		)
+		if err != nil {
+			t.Fatalf("CountJobStats with backslash prefix should not error: %v", err)
+		}
+
+		_, _, err = db.ListReposWithReviewCounts(
+			WithRepoPathPrefix(`C:\Users\dev\workspace`),
+		)
+		if err != nil {
+			t.Fatalf("ListReposWithReviewCounts with backslash prefix should not error: %v", err)
+		}
+	})
+}
+
+func TestRootPrefixMatchesAllRepos(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+
+	// Use t.TempDir() as parent so paths are absolute on all platforms.
+	base := t.TempDir()
+	basePrefix := filepath.ToSlash(base)
+
+	createRepo(t, db, filepath.Join(base, "a", "repo1"))
+	createRepo(t, db, filepath.Join(base, "b", "repo2"))
+
+	r1, _ := db.GetRepoByPath(filepath.Join(base, "a", "repo1"))
+	c1 := createCommit(t, db, r1.ID, "r1")
+	enqueueJob(t, db, r1.ID, c1.ID, "r1")
+
+	r2, _ := db.GetRepoByPath(filepath.Join(base, "b", "repo2"))
+	c2 := createCommit(t, db, r2.ID, "r2")
+	enqueueJob(t, db, r2.ID, c2.ID, "r2")
+
+	t.Run("parent prefix returns all repos via ListJobs", func(t *testing.T) {
+		jobs, err := db.ListJobs(
+			"", "", 50, 0, WithRepoPrefix(basePrefix),
+		)
+		if err != nil {
+			t.Fatalf("ListJobs failed: %v", err)
+		}
+		if len(jobs) != 2 {
+			t.Errorf("Expected 2 jobs with parent prefix, got %d", len(jobs))
+		}
+	})
+
+	t.Run("parent prefix returns all repos via ListReposWithReviewCounts", func(t *testing.T) {
+		repos, total, err := db.ListReposWithReviewCounts(
+			WithRepoPathPrefix(basePrefix),
+		)
+		if err != nil {
+			t.Fatalf("ListReposWithReviewCounts failed: %v", err)
+		}
+		if len(repos) != 2 {
+			t.Errorf("Expected 2 repos with parent prefix, got %d", len(repos))
+		}
+		if total != 2 {
+			t.Errorf("Expected total 2, got %d", total)
+		}
+	})
+}
+
+func TestListReposWithCombinedPrefixAndBranch(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+
+	// Use t.TempDir() so paths are absolute on all platforms.
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	wsPrefix := filepath.ToSlash(ws)
+
+	// Create repos under workspace and one outside
+	r1 := createRepo(t, db, filepath.Join(ws, "repo-a"))
+	r2 := createRepo(t, db, filepath.Join(ws, "repo-b"))
+	r3 := createRepo(t, db, filepath.Join(base, "other", "repo-c"))
+
+	// repo-a: 2 jobs on main, 1 on feature
+	c1 := createCommit(t, db, r1.ID, "a1")
+	c2 := createCommit(t, db, r1.ID, "a2")
+	c3 := createCommit(t, db, r1.ID, "a3")
+	j1 := enqueueJob(t, db, r1.ID, c1.ID, "a1")
+	j2 := enqueueJob(t, db, r1.ID, c2.ID, "a2")
+	j3 := enqueueJob(t, db, r1.ID, c3.ID, "a3")
+	setJobBranch(t, db, j1.ID, "main")
+	setJobBranch(t, db, j2.ID, "main")
+	setJobBranch(t, db, j3.ID, "feature")
+
+	// repo-b: 1 job on main
+	c4 := createCommit(t, db, r2.ID, "b1")
+	j4 := enqueueJob(t, db, r2.ID, c4.ID, "b1")
+	setJobBranch(t, db, j4.ID, "main")
+
+	// repo-c (outside workspace): 1 job on main
+	c5 := createCommit(t, db, r3.ID, "c1")
+	j5 := enqueueJob(t, db, r3.ID, c5.ID, "c1")
+	setJobBranch(t, db, j5.ID, "main")
+
+	t.Run("prefix + branch filters both", func(t *testing.T) {
+		repos, total, err := db.ListReposWithReviewCounts(
+			WithRepoPathPrefix(wsPrefix),
+			WithRepoBranch("main"),
+		)
+		if err != nil {
+			t.Fatalf("ListReposWithReviewCounts failed: %v", err)
+		}
+		if len(repos) != 2 {
+			t.Errorf("Expected 2 repos under ws with main, got %d", len(repos))
+		}
+		if total != 3 {
+			t.Errorf("Expected total 3 (2+1), got %d", total)
+		}
+	})
+
+	t.Run("prefix + feature branch", func(t *testing.T) {
+		repos, total, err := db.ListReposWithReviewCounts(
+			WithRepoPathPrefix(wsPrefix),
+			WithRepoBranch("feature"),
+		)
+		if err != nil {
+			t.Fatalf("ListReposWithReviewCounts failed: %v", err)
+		}
+		if len(repos) != 1 {
+			t.Errorf("Expected 1 repo, got %d", len(repos))
+		}
+		if total != 1 {
+			t.Errorf("Expected total 1, got %d", total)
+		}
+	})
+
+	t.Run("prefix only returns all branches", func(t *testing.T) {
+		repos, total, err := db.ListReposWithReviewCounts(
+			WithRepoPathPrefix(wsPrefix),
+		)
+		if err != nil {
+			t.Fatalf("ListReposWithReviewCounts failed: %v", err)
+		}
+		if len(repos) != 2 {
+			t.Errorf("Expected 2 repos under ws, got %d", len(repos))
+		}
+		if total != 4 {
+			t.Errorf("Expected total 4 (3+1), got %d", total)
+		}
+	})
 }
